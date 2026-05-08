@@ -249,7 +249,7 @@ public:
         usleep(100);
     }
 
-    sensor_msgs::Imu imuConverter(const sensor_msgs::Imu& imu_in)
+    sensor_msgs::Imu imuConverter(const sensor_msgs::Imu& imu_in) /* 只处理旋转，向量在坐标系变换时只需要旋转，平移不会改变向量的方向和大小 */
     {
         sensor_msgs::Imu imu_out = imu_in;
         // rotate acceleration

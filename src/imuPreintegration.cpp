@@ -75,6 +75,7 @@ public:
         return pcl::getTransformation(x, y, z, roll, pitch, yaw);
     }
 
+    /* 激光里程计 */
     void lidarOdometryHandler(const nav_msgs::Odometry::ConstPtr& odomMsg)
     {
         std::lock_guard<std::mutex> lock(mtx);
@@ -84,6 +85,7 @@ public:
         lidarOdomTime = odomMsg->header.stamp.toSec();
     }
 
+    /* IMU里程计 */
     void imuOdometryHandler(const nav_msgs::Odometry::ConstPtr& odomMsg)
     {
         // static tf
@@ -108,7 +110,7 @@ public:
         Eigen::Affine3f imuOdomAffineFront = odom2affine(imuOdomQueue.front());
         Eigen::Affine3f imuOdomAffineBack = odom2affine(imuOdomQueue.back());
         Eigen::Affine3f imuOdomAffineIncre = imuOdomAffineFront.inverse() * imuOdomAffineBack;
-        Eigen::Affine3f imuOdomAffineLast = lidarOdomAffine * imuOdomAffineIncre;
+        Eigen::Affine3f imuOdomAffineLast = lidarOdomAffine * imuOdomAffineIncre; /* 加上imu积分的变换 */
         float x, y, z, roll, pitch, yaw;
         pcl::getTranslationAndEulerAngles(imuOdomAffineLast, x, y, z, roll, pitch, yaw);
         
@@ -125,7 +127,7 @@ public:
         tf::Transform tCur;
         tf::poseMsgToTF(laserOdometry.pose.pose, tCur);
         if(lidarFrame != baselinkFrame)
-            tCur = tCur * lidar2Baselink;
+            tCur = tCur * lidar2Baselink; /* 把雷达里程计的坐标系转换到基坐标系 */
         tf::StampedTransform odom_2_baselink = tf::StampedTransform(tCur, odomMsg->header.stamp, odometryFrame, baselinkFrame);
         tfOdom2BaseLink.sendTransform(odom_2_baselink);
 
@@ -173,8 +175,8 @@ public:
     gtsam::Vector noiseModelBetweenBias;
 
 
-    gtsam::PreintegratedImuMeasurements *imuIntegratorOpt_;
-    gtsam::PreintegratedImuMeasurements *imuIntegratorImu_;
+    gtsam::PreintegratedImuMeasurements *imuIntegratorOpt_; /* 优化用 */
+    gtsam::PreintegratedImuMeasurements *imuIntegratorImu_; /* 发布IMU里程计用 */
 
     std::deque<sensor_msgs::Imu> imuQueOpt;
     std::deque<sensor_msgs::Imu> imuQueImu;
@@ -207,38 +209,45 @@ public:
     IMUPreintegration()
     {
         subImu      = nh.subscribe<sensor_msgs::Imu>  (imuTopic,                   2000, &IMUPreintegration::imuHandler,      this, ros::TransportHints().tcpNoDelay());
-        subOdometry = nh.subscribe<nav_msgs::Odometry>("lio_sam/mapping/odometry_incremental", 5,    &IMUPreintegration::odometryHandler, this, ros::TransportHints().tcpNoDelay());
+        subOdometry = nh.subscribe<nav_msgs::Odometry>("lio_sam/mapping/odometry_incremental", 5,    &IMUPreintegration::odometryHandler, this, ros::TransportHints().tcpNoDelay()); /* 增量里程计，只关心两帧之间 */
 
         pubImuOdometry = nh.advertise<nav_msgs::Odometry> (odomTopic+"_incremental", 2000);
 
-        boost::shared_ptr<gtsam::PreintegrationParams> p = gtsam::PreintegrationParams::MakeSharedU(imuGravity);
-        p->accelerometerCovariance  = gtsam::Matrix33::Identity(3,3) * pow(imuAccNoise, 2); // acc white noise in continuous
+        boost::shared_ptr<gtsam::PreintegrationParams> p = gtsam::PreintegrationParams::MakeSharedU(imuGravity); /* 设置重力加速度，单位m/s^2，正数，算法内部会自动转换为负数 */
+        p->accelerometerCovariance  = gtsam::Matrix33::Identity(3,3) * pow(imuAccNoise, 2); // acc white noise in continuous 
         p->gyroscopeCovariance      = gtsam::Matrix33::Identity(3,3) * pow(imuGyrNoise, 2); // gyro white noise in continuous
         p->integrationCovariance    = gtsam::Matrix33::Identity(3,3) * pow(1e-4, 2); // error committed in integrating position from velocities
         gtsam::imuBias::ConstantBias prior_imu_bias((gtsam::Vector(6) << 0, 0, 0, 0, 0, 0).finished());; // assume zero initial bias
 
+        /* 表示初始位姿的不确定性 */
         priorPoseNoise  = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2).finished()); // rad,rad,rad,m, m, m
+        /* 表示初始速度的不确定性 */
         priorVelNoise   = gtsam::noiseModel::Isotropic::Sigma(3, 1e4); // m/s
+        /* 表示IMU初始偏置的不确定性 */
         priorBiasNoise  = gtsam::noiseModel::Isotropic::Sigma(6, 1e-3); // 1e-2 ~ 1e-3 seems to be good
+        /* 激光雷达里程计校正噪声 */ 
         correctionNoise = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 0.05, 0.05, 0.05, 0.1, 0.1, 0.1).finished()); // rad,rad,rad,m, m, m
+        /* 退化情况校正噪声 */ 
         correctionNoise2 = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 1, 1, 1, 1, 1, 1).finished()); // rad,rad,rad,m, m, m
+        /* IMU偏置（包括加速度计偏置和陀螺仪偏置）随时间变化的噪声特性 */
         noiseModelBetweenBias = (gtsam::Vector(6) << imuAccBiasN, imuAccBiasN, imuAccBiasN, imuGyrBiasN, imuGyrBiasN, imuGyrBiasN).finished();
-        
+        /* 基础预积分器 */
         imuIntegratorImu_ = new gtsam::PreintegratedImuMeasurements(p, prior_imu_bias); // setting up the IMU integration for IMU message thread
+        /* 带优化的预积分器 */
         imuIntegratorOpt_ = new gtsam::PreintegratedImuMeasurements(p, prior_imu_bias); // setting up the IMU integration for optimization        
     }
 
     void resetOptimization()
     {
         gtsam::ISAM2Params optParameters;
-        optParameters.relinearizeThreshold = 0.1;
-        optParameters.relinearizeSkip = 1;
-        optimizer = gtsam::ISAM2(optParameters);
+        optParameters.relinearizeThreshold = 0.1; /* 设置增量重线性化阈值，0.1同时表示距离和弧度，经验值，工程认为1m与1rad同等显著 */
+        optParameters.relinearizeSkip = 1; /* 值为 1：每一步优化后都检查并执行重线性化（最激进，精度最高）*/
+        optimizer = gtsam::ISAM2(optParameters); /* ISAM2 (Incremental Smoothing and Mapping 2)：支持增量式稀疏优化 */
 
-        gtsam::NonlinearFactorGraph newGraphFactors;
+        gtsam::NonlinearFactorGraph newGraphFactors; /* 一个容器，包含多个因子对象，每个因子代表一个观测约束或先验约束 */
         graphFactors = newGraphFactors;
 
-        gtsam::Values NewGraphValues;
+        gtsam::Values NewGraphValues; /* 存储所有变量节点的初始估计值（优化算法的起点） */
         graphValues = NewGraphValues;
     }
 
@@ -251,9 +260,9 @@ public:
 
     void odometryHandler(const nav_msgs::Odometry::ConstPtr& odomMsg)
     {
-        std::lock_guard<std::mutex> lock(mtx);
+        std::lock_guard<std::mutex> lock(mtx); /* 没懂，整个函数都加锁？ */
 
-        double currentCorrectionTime = ROS_TIME(odomMsg);
+        double currentCorrectionTime = ROS_TIME(odomMsg); /* 当前校正时间 */
 
         // make sure we have imu data to integrate
         if (imuQueOpt.empty())
@@ -273,12 +282,12 @@ public:
         // 0. initialize system
         if (systemInitialized == false)
         {
-            resetOptimization();
+            resetOptimization(); /* 重置优化器 */
 
             // pop old IMU message
             while (!imuQueOpt.empty())
             {
-                if (ROS_TIME(&imuQueOpt.front()) < currentCorrectionTime - delta_t)
+                if (ROS_TIME(&imuQueOpt.front()) < currentCorrectionTime - delta_t) /* 保证没有过期的IMU数据 */
                 {
                     lastImuT_opt = ROS_TIME(&imuQueOpt.front());
                     imuQueOpt.pop_front();
@@ -315,10 +324,34 @@ public:
             return;
         }
 
-
+        
+        /**
+         * @brief 基于当前优化状态重置因子图优化器，实现连续估计中的热重启
+         * 
+         * 该代码块执行以下操作：
+         * 1. 从当前优化器中提取 key-1 时刻的位姿、速度、IMU偏置的边缘协方差
+         * 2. 重置优化器（清空因子图、变量节点和内部状态）
+         * 3. 使用当前估计值作为新优化问题的初始状态，并利用提取的协方差作为先验噪声模型
+         * 4. 添加先验因子并执行一次优化，完成优化器的重新初始化
+         * 5. 清空临时数据，重置关键帧索引为1
+         * 
+         * 这种设计允许系统在长时间运行或发生闭环检测后，将历史信息"压缩"为协方差矩阵，
+         * 重新开始优化，同时保持估计的连续性和不确定性信息的传递，避免因子图无限增长
+         * 导致的计算负担。
+         * 
+         * @note 该操作通常在以下场景使用：
+         *       - SLAM系统长时间运行后的状态重置
+         *       - 闭环检测后的位姿图优化重置
+         *       - 用户手动修正位姿后的系统重启
+         *       - 多会话SLAM中的状态切换
+         * 
+         * @warning 使用前需确保 prevPose_, prevVel_, prevBias_ 已更新为当前最优估计值
+         * @warning 协方差矩阵可能奇异或包含NaN，建议添加有效性检查
+         */
         // reset graph for speed
         if (key == 100)
         {
+            /* 优化器中提取的实际协方差矩阵，反映学习到的不确定性 */
             // get updated noise before reset
             gtsam::noiseModel::Gaussian::shared_ptr updatedPoseNoise = gtsam::noiseModel::Gaussian::Covariance(optimizer.marginalCovariance(X(key-1)));
             gtsam::noiseModel::Gaussian::shared_ptr updatedVelNoise  = gtsam::noiseModel::Gaussian::Covariance(optimizer.marginalCovariance(V(key-1)));
@@ -353,12 +386,12 @@ public:
             // pop and integrate imu data that is between two optimizations
             sensor_msgs::Imu *thisImu = &imuQueOpt.front();
             double imuTime = ROS_TIME(thisImu);
-            if (imuTime < currentCorrectionTime - delta_t)
+            if (imuTime < currentCorrectionTime - delta_t) /* 本次Odom结束前的数据 */
             {
                 double dt = (lastImuT_opt < 0) ? (1.0 / 500.0) : (imuTime - lastImuT_opt);
                 imuIntegratorOpt_->integrateMeasurement(
                         gtsam::Vector3(thisImu->linear_acceleration.x, thisImu->linear_acceleration.y, thisImu->linear_acceleration.z),
-                        gtsam::Vector3(thisImu->angular_velocity.x,    thisImu->angular_velocity.y,    thisImu->angular_velocity.z), dt);
+                        gtsam::Vector3(thisImu->angular_velocity.x,    thisImu->angular_velocity.y,    thisImu->angular_velocity.z), dt); /* 将一帧IMU原始数据「累加」到预积分器 */
                 
                 lastImuT_opt = imuTime;
                 imuQueOpt.pop_front();
@@ -373,6 +406,7 @@ public:
         // add imu bias between factor
         graphFactors.add(gtsam::BetweenFactor<gtsam::imuBias::ConstantBias>(B(key - 1), B(key), gtsam::imuBias::ConstantBias(),
                          gtsam::noiseModel::Diagonal::Sigmas(sqrt(imuIntegratorOpt_->deltaTij()) * noiseModelBetweenBias)));
+        /* 激光里程计的位姿约束 */
         // add pose factor
         gtsam::Pose3 curPose = lidarPose.compose(lidar2Imu);
         gtsam::PriorFactor<gtsam::Pose3> pose_factor(X(key), curPose, degenerate ? correctionNoise2 : correctionNoise);
@@ -414,10 +448,10 @@ public:
             imuQueImu.pop_front();
         }
         // repropogate
-        if (!imuQueImu.empty())
+        if (!imuQueImu.empty()) /* 在本函数执行过程中会有新的imu数据 */
         {
             // reset bias use the newly optimized bias
-            imuIntegratorImu_->resetIntegrationAndSetBias(prevBiasOdom);
+            imuIntegratorImu_->resetIntegrationAndSetBias(prevBiasOdom); /* 重置，清空预积分器（imu队列中每帧数据都会在Imu回调中加入预积分，为防止重复，要先清除）*/
             // integrate imu message from the beginning of this optimization
             for (int i = 0; i < (int)imuQueImu.size(); ++i)
             {
@@ -438,7 +472,7 @@ public:
     bool failureDetection(const gtsam::Vector3& velCur, const gtsam::imuBias::ConstantBias& biasCur)
     {
         Eigen::Vector3f vel(velCur.x(), velCur.y(), velCur.z());
-        if (vel.norm() > 30)
+        if (vel.norm() > 30) /* 30m/s 108km/h */
         {
             ROS_WARN("Large velocity, reset IMU-preintegration!");
             return true;
@@ -455,11 +489,11 @@ public:
         return false;
     }
 
-    void imuHandler(const sensor_msgs::Imu::ConstPtr& imu_raw)
+    void imuHandler(const sensor_msgs::Imu::ConstPtr& imu_raw) /* 实现简单的预积分 */
     {
         std::lock_guard<std::mutex> lock(mtx);
 
-        sensor_msgs::Imu thisImu = imuConverter(*imu_raw);
+        sensor_msgs::Imu thisImu = imuConverter(*imu_raw); /* 坐标系转换 */
 
         imuQueOpt.push_back(thisImu);
         imuQueImu.push_back(thisImu);
@@ -476,7 +510,7 @@ public:
                                                 gtsam::Vector3(thisImu.angular_velocity.x,    thisImu.angular_velocity.y,    thisImu.angular_velocity.z), dt);
 
         // predict odometry
-        gtsam::NavState currentState = imuIntegratorImu_->predict(prevStateOdom, prevBiasOdom);
+        gtsam::NavState currentState = imuIntegratorImu_->predict(prevStateOdom, prevBiasOdom); /* 连续调用没影响 */
 
         // publish odometry
         nav_msgs::Odometry odometry;
@@ -486,9 +520,9 @@ public:
 
         // transform imu pose to ldiar
         gtsam::Pose3 imuPose = gtsam::Pose3(currentState.quaternion(), currentState.position());
-        gtsam::Pose3 lidarPose = imuPose.compose(imu2Lidar);
+        gtsam::Pose3 lidarPose = imuPose.compose(imu2Lidar); /* 只做平移 */
 
-        odometry.pose.pose.position.x = lidarPose.translation().x();
+        odometry.pose.pose.position.x = lidarPose.translation().x(); /* 通过imu预积分得到 */
         odometry.pose.pose.position.y = lidarPose.translation().y();
         odometry.pose.pose.position.z = lidarPose.translation().z();
         odometry.pose.pose.orientation.x = lidarPose.rotation().toQuaternion().x();
@@ -496,10 +530,10 @@ public:
         odometry.pose.pose.orientation.z = lidarPose.rotation().toQuaternion().z();
         odometry.pose.pose.orientation.w = lidarPose.rotation().toQuaternion().w();
         
-        odometry.twist.twist.linear.x = currentState.velocity().x();
+        odometry.twist.twist.linear.x = currentState.velocity().x(); /* IMU预积分预测的速度状态 */
         odometry.twist.twist.linear.y = currentState.velocity().y();
         odometry.twist.twist.linear.z = currentState.velocity().z();
-        odometry.twist.twist.angular.x = thisImu.angular_velocity.x + prevBiasOdom.gyroscope().x();
+        odometry.twist.twist.angular.x = thisImu.angular_velocity.x + prevBiasOdom.gyroscope().x(); /* 当前IMU测量值 + 估计的陀螺仪偏置 */
         odometry.twist.twist.angular.y = thisImu.angular_velocity.y + prevBiasOdom.gyroscope().y();
         odometry.twist.twist.angular.z = thisImu.angular_velocity.z + prevBiasOdom.gyroscope().z();
         pubImuOdometry.publish(odometry);
