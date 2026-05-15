@@ -78,7 +78,7 @@ public:
         publishFeatureCloud();
     }
 
-    void calculateSmoothness()
+    void calculateSmoothness() /* 和LOAM中的曲率计算方法相同 */
     {
         int cloudSize = extractedCloud->points.size();
         for (int i = 5; i < cloudSize - 5; i++)
@@ -100,7 +100,7 @@ public:
         }
     }
 
-    void markOccludedPoints()
+    void markOccludedPoints() /* 标记遮挡点和平行光束点 */
     {
         int cloudSize = extractedCloud->points.size();
         // mark occluded points and parallel beam points
@@ -113,14 +113,14 @@ public:
 
             if (columnDiff < 10){
                 // 10 pixel diff in range image
-                if (depth1 - depth2 > 0.3){
+                if (depth1 - depth2 > 0.3){ /* 遮挡点 */
                     cloudNeighborPicked[i - 5] = 1;
                     cloudNeighborPicked[i - 4] = 1;
                     cloudNeighborPicked[i - 3] = 1;
                     cloudNeighborPicked[i - 2] = 1;
                     cloudNeighborPicked[i - 1] = 1;
                     cloudNeighborPicked[i] = 1;
-                }else if (depth2 - depth1 > 0.3){
+                }else if (depth2 - depth1 > 0.3){ /* 遮挡点 */
                     cloudNeighborPicked[i + 1] = 1;
                     cloudNeighborPicked[i + 2] = 1;
                     cloudNeighborPicked[i + 3] = 1;
@@ -133,7 +133,7 @@ public:
             float diff1 = std::abs(float(cloudInfo.pointRange[i-1] - cloudInfo.pointRange[i]));
             float diff2 = std::abs(float(cloudInfo.pointRange[i+1] - cloudInfo.pointRange[i]));
 
-            if (diff1 > 0.02 * cloudInfo.pointRange[i] && diff2 > 0.02 * cloudInfo.pointRange[i])
+            if (diff1 > 0.02 * cloudInfo.pointRange[i] && diff2 > 0.02 * cloudInfo.pointRange[i]) /* 平行光束点 */
                 cloudNeighborPicked[i] = 1;
         }
     }
