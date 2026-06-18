@@ -33,8 +33,8 @@ public:
     std_msgs::Header cloudHeader;
 
     std::vector<smoothness_t> cloudSmoothness;
-    float *cloudCurvature;
-    int *cloudNeighborPicked;
+    float *cloudCurvature; /* 曲率数组 */
+    int *cloudNeighborPicked; /* 遮挡点标记数组 */
     int *cloudLabel;
 
     FeatureExtraction()
@@ -152,7 +152,7 @@ public:
 
             for (int j = 0; j < 6; j++)
             {
-
+                /* 分成6段，sp为当前段的起始点，ep为当前段的结束点,索引 */
                 int sp = (cloudInfo.startRingIndex[i] * (6 - j) + cloudInfo.endRingIndex[i] * j) / 6;
                 int ep = (cloudInfo.startRingIndex[i] * (5 - j) + cloudInfo.endRingIndex[i] * (j + 1)) / 6 - 1;
 

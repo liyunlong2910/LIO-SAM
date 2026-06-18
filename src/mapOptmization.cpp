@@ -90,7 +90,7 @@ public:
     pcl::PointCloud<PointType>::Ptr cloudKeyPoses3D;
     pcl::PointCloud<PointTypePose>::Ptr cloudKeyPoses6D;
     pcl::PointCloud<PointType>::Ptr copy_cloudKeyPoses3D;
-    pcl::PointCloud<PointTypePose>::Ptr copy_cloudKeyPoses6D;
+    pcl::PointCloud<PointTypePose>::Ptr copy_cloudKeyPoses6D; /* 并非点云，每个“点”是一个点云的6D位姿 */
 
     pcl::PointCloud<PointType>::Ptr laserCloudCornerLast; // corner feature set from odoOptimization
     pcl::PointCloud<PointType>::Ptr laserCloudSurfLast; // surf feature set from odoOptimization
@@ -306,7 +306,7 @@ public:
 
     gtsam::Pose3 pclPointTogtsamPose3(PointTypePose thisPoint)
     {
-        return gtsam::Pose3(gtsam::Rot3::RzRyRx(double(thisPoint.roll), double(thisPoint.pitch), double(thisPoint.yaw)),
+        return gtsam::Pose3(gtsam::Rot3::RzRyRx(double(thisPoint.roll), double(thisPoint.pitch), double(thisPoint.yaw)), /* 顺序是zyx, 但是参数是xyz */
                                   gtsam::Point3(double(thisPoint.x),    double(thisPoint.y),     double(thisPoint.z)));
     }
 
@@ -1011,13 +1011,17 @@ public:
                 }
                 a11 /= 5; a12 /= 5; a13 /= 5; a22 /= 5; a23 /= 5; a33 /= 5;
 
+                /* 构建协方差矩阵 */
                 matA1.at<float>(0, 0) = a11; matA1.at<float>(0, 1) = a12; matA1.at<float>(0, 2) = a13;
                 matA1.at<float>(1, 0) = a12; matA1.at<float>(1, 1) = a22; matA1.at<float>(1, 2) = a23;
                 matA1.at<float>(2, 0) = a13; matA1.at<float>(2, 1) = a23; matA1.at<float>(2, 2) = a33;
 
+                /* 求解特征值和特征向量，opencv的行向量是特征向量，降序，eigen的SelfAdjointEigenSolver是列向量升序 */
                 cv::eigen(matA1, matD1, matV1);
 
+                 /* 判断是否为角点：最大特征值 > 3倍第二大特征值，说明点云在主方向上高度集中，形成一条线（边缘特征） */
                 if (matD1.at<float>(0, 0) > 3 * matD1.at<float>(0, 1)) {
+                    /* 沿特征值正方向和负方向0.1m取两个点 */
 
                     float x0 = pointSel.x;
                     float y0 = pointSel.y;
@@ -1029,12 +1033,21 @@ public:
                     float y2 = cy - 0.1 * matV1.at<float>(0, 1);
                     float z2 = cz - 0.1 * matV1.at<float>(0, 2);
 
+                    /* 叉乘的模 */
                     float a012 = sqrt(((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) * ((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) 
                                     + ((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1)) * ((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1)) 
                                     + ((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1)) * ((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1)));
 
+                    /* P1 P2的模 */
                     float l12 = sqrt((x1 - x2)*(x1 - x2) + (y1 - y2)*(y1 - y2) + (z1 - z2)*(z1 - z2));
 
+                    /* 3.9 计算点到直线的雅可比矩阵（优化方向）
+                     * la, lb, lc 是点到直线距离对x,y,z的偏导数
+                     * 即残差函数 r = |P0到直线P1P2的距离| 的梯度方向
+                     * 
+                     * 推导过程：点到直线的距离 = |(P0-P1) × (P0-P2)| / |P1-P2|
+                     * 这里 la, lb, lc 就是归一化后的梯度方向
+                     */
                     float la = ((y1 - y2)*((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) 
                               + (z1 - z2)*((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1))) / a012 / l12;
 
@@ -1044,15 +1057,19 @@ public:
                     float lc = -((x1 - x2)*((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1)) 
                                + (y1 - y2)*((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1))) / a012 / l12;
 
+                    /* P0到直线P1 P2的距离 */
                     float ld2 = a012 / l12;
 
+                    /* 计算权重系数s（距离越近，权重越大）距离为0时s=1，距离为1时s=0.1，距离越大权重越小 */
                     float s = 1 - 0.9 * fabs(ld2);
 
+                    /* 3.12 填充系数：方向向量乘以权重，强度存储距离 */
                     coeff.x = s * la;
                     coeff.y = s * lb;
                     coeff.z = s * lc;
                     coeff.intensity = s * ld2;
 
+                    /* 如果权重足够大，将此点标记为有效的角点约束 */
                     if (s > 0.1) {
                         laserCloudOriCornerVec[i] = pointOri;
                         coeffSelCornerVec[i] = coeff;
